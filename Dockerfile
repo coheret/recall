@@ -35,8 +35,8 @@ RUN cargo test --workspace --locked
 FROM debian:bookworm-slim AS runtime
 LABEL org.opencontainers.image.title="Recall" \
       org.opencontainers.image.description="Multithreaded in-memory cache server built in Rust" \
-      org.opencontainers.image.vendor="Avenelle" \
-      org.opencontainers.image.source="https://github.com/Avenelle/recall"
+      org.opencontainers.image.vendor="Coheret" \
+      org.opencontainers.image.source="https://github.com/Coheret/recall"
 WORKDIR /app
 RUN mkdir -p /etc/recall && chmod 0755 /etc/recall
 COPY --from=build /build/target/release/recall-server /usr/local/bin/recall-server

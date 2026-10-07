@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["Coheret"]
-repository = "https://github.com/Coheret/recall"
+repository = "https://github.com/coheret/recall"
 publish = false
 
 [workspace.dependencies]

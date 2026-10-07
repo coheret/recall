@@ -36,7 +36,7 @@ FROM debian:bookworm-slim AS runtime
 LABEL org.opencontainers.image.title="Recall" \
       org.opencontainers.image.description="Multithreaded in-memory cache server built in Rust" \
       org.opencontainers.image.vendor="Coheret" \
-      org.opencontainers.image.source="https://github.com/Coheret/recall"
+      org.opencontainers.image.source="https://github.com/coheret/recall"
 WORKDIR /app
 RUN mkdir -p /etc/recall && chmod 0755 /etc/recall
 COPY --from=build /build/target/release/recall-server /usr/local/bin/recall-server

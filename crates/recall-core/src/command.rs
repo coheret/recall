@@ -512,4 +512,272 @@ mod tests {
         assert!(parse(&args(&["MSET", "a", "1", "b"]), &ParseLimits::default()).is_err());
         assert!(parse(&args(&["MULTI"]), &ParseLimits::default()).is_err());
     }
+
+    #[test]
+    fn empty_unknown_and_arity_violations_are_rejected() {
+        assert_eq!(
+            parse(&[], &ParseLimits::default()).unwrap_err().0,
+            "ERR empty command"
+        );
+        assert_eq!(
+            parse(&args(&["WHATEVER"]), &ParseLimits::default())
+                .unwrap_err()
+                .0,
+            "ERR unknown command"
+        );
+        assert_eq!(
+            parse(&args(&["GET", "k", "extra"]), &ParseLimits::default())
+                .unwrap_err()
+                .0,
+            "ERR wrong number of arguments for 'get' command"
+        );
+        assert_eq!(
+            parse(&args(&["ECHO"]), &ParseLimits::default())
+                .unwrap_err()
+                .0,
+            "ERR wrong number of arguments for 'echo' command"
+        );
+        assert_eq!(
+            parse(&args(&["PING", "a", "b", "c"]), &ParseLimits::default())
+                .unwrap_err()
+                .0,
+            "ERR syntax error"
+        );
+        assert!(parse(&args(&["COMMAND", "DOCS"]), &ParseLimits::default()).is_err());
+    }
+
+    #[test]
+    fn key_and_value_limits_apply_at_exact_boundaries() {
+        let limits = ParseLimits {
+            max_key_bytes: 2,
+            max_value_bytes: 3,
+            ..ParseLimits::default()
+        };
+        assert!(parse(&args(&["SET", "ab", "123"]), &limits).is_ok());
+        assert_eq!(
+            parse(&args(&["SET", "abc", "1"]), &limits).unwrap_err().0,
+            "ERR key exceeds configured limit"
+        );
+        assert_eq!(
+            parse(&args(&["SET", "a", "1234"]), &limits).unwrap_err().0,
+            "ERR value exceeds configured limit"
+        );
+        // Every key and value in a multi-key command is checked, not the first.
+        assert_eq!(
+            parse(&args(&["DEL", "a", "abc"]), &limits).unwrap_err().0,
+            "ERR key exceeds configured limit"
+        );
+        assert_eq!(
+            parse(&args(&["MSET", "a", "1", "bb", "1234"]), &limits)
+                .unwrap_err()
+                .0,
+            "ERR value exceeds configured limit"
+        );
+        assert!(parse(&args(&["MGET", "ab", "cd"]), &limits).is_ok());
+    }
+
+    #[test]
+    fn expire_and_integer_overflows_are_rejected_before_storage() {
+        // Integers longer than 20 bytes never reach parsing.
+        assert!(integer(b"100000000000000000000").is_err());
+        assert_eq!(
+            parse(
+                &args(&["EXPIRE", "k", "9223372036854775807"]),
+                &ParseLimits::default()
+            )
+            .unwrap_err()
+            .0,
+            "ERR invalid expire time in 'expire' command"
+        );
+        assert_eq!(
+            parse(
+                &args(&["SET", "k", "v", "EX", "9223372036854775807"]),
+                &ParseLimits::default()
+            )
+            .unwrap_err()
+            .0,
+            "ERR invalid expire time in 'set' command"
+        );
+        // PEXPIRE passes large values through; the store bounds the deadline.
+        assert!(matches!(
+            parse(
+                &args(&["PEXPIRE", "k", "9223372036854775807"]),
+                &ParseLimits::default()
+            )
+            .unwrap(),
+            Command::Data(Operation::Expire {
+                milliseconds: i64::MAX,
+                ..
+            })
+        ));
+        // Negative expirations parse; the store treats them as deletion.
+        assert!(matches!(
+            parse(&args(&["EXPIRE", "k", "-5"]), &ParseLimits::default()).unwrap(),
+            Command::Data(Operation::Expire {
+                milliseconds: -5000,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn hello_and_client_options_are_validated_at_parse_time() {
+        assert!(matches!(
+            parse(&args(&["HELLO"]), &ParseLimits::default()).unwrap(),
+            Command::Hello {
+                protocol: None,
+                auth: None,
+                name: None
+            }
+        ));
+        assert!(matches!(
+            parse(&args(&["HELLO", "2"]), &ParseLimits::default()).unwrap(),
+            Command::Hello {
+                protocol: Some(2),
+                ..
+            }
+        ));
+        assert!(parse(&args(&["HELLO", "two"]), &ParseLimits::default()).is_err());
+        // AUTH requires exactly a username and password; repeats are rejected.
+        assert!(parse(&args(&["HELLO", "2", "AUTH", "default"]), &ParseLimits::default()).is_err());
+        assert!(
+            parse(
+                &args(&["HELLO", "2", "AUTH", "a", "b", "AUTH", "a", "b"]),
+                &ParseLimits::default()
+            )
+            .is_err()
+        );
+        assert!(matches!(
+            parse(
+                &args(&["HELLO", "2", "AUTH", "u", "p", "SETNAME", "n"]),
+                &ParseLimits::default()
+            )
+            .unwrap(),
+            Command::Hello {
+                protocol: Some(2),
+                auth: Some(_),
+                name: Some(_)
+            }
+        ));
+        assert!(matches!(
+            parse(&args(&["CLIENT", "SETNAME", "ok-name"]), &ParseLimits::default()).unwrap(),
+            Command::Client(ClientCommand::SetName(_))
+        ));
+        assert!(matches!(
+            parse(
+                &args(&["CLIENT", "SETINFO", "LIB-NAME", "lib"]),
+                &ParseLimits::default()
+            )
+            .unwrap(),
+            Command::Client(ClientCommand::SetInfo {
+                library_name: true,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse(
+                &args(&["CLIENT", "SETINFO", "lib-ver", "1.0"]),
+                &ParseLimits::default()
+            )
+            .unwrap(),
+            Command::Client(ClientCommand::SetInfo {
+                library_name: false,
+                ..
+            })
+        ));
+        assert_eq!(
+            parse(&args(&["CLIENT", "SETINFO", "bogus", "x"]), &ParseLimits::default())
+                .unwrap_err()
+                .0,
+            "ERR unsupported CLIENT SETINFO attribute"
+        );
+        assert!(parse(&args(&["CLIENT", "bogus"]), &ParseLimits::default()).is_err());
+    }
+
+    #[test]
+    fn client_name_boundaries_are_enforced() {
+        let limits = ParseLimits {
+            max_client_metadata_bytes: 2,
+            ..ParseLimits::default()
+        };
+        assert!(parse(&args(&["CLIENT", "SETNAME", "ab"]), &limits).is_ok());
+        assert!(parse(&args(&["CLIENT", "SETNAME", "abc"]), &limits).is_err());
+        // Only printable non-space ASCII is accepted: 33 and 126 pass.
+        assert!(parse(&args(&["CLIENT", "SETNAME", "!~"]), &ParseLimits::default()).is_ok());
+        for invalid in ["bad name", "\x7f", "tab\t", "new\n"] {
+            assert!(
+                parse(&args(&["CLIENT", "SETNAME", invalid]), &ParseLimits::default()).is_err(),
+                "{invalid:?}"
+            );
+        }
+        // Empty names parse; the session layer normalizes them away.
+        assert!(parse(&args(&["CLIENT", "SETNAME", ""]), &ParseLimits::default()).is_ok());
+    }
+
+    #[test]
+    fn command_metadata_stays_consistent_with_the_spec_table() {
+        let Reply::Array(all) = metadata(MetadataCommand::All) else {
+            panic!("expected an array")
+        };
+        assert_eq!(
+            metadata(MetadataCommand::Count),
+            Reply::Integer(all.len() as i64)
+        );
+        assert_eq!(
+            metadata(MetadataCommand::Info(vec![])),
+            metadata(MetadataCommand::All)
+        );
+        let Reply::Array(info) = metadata(MetadataCommand::Info(vec![
+            Bytes::from_static(b"GET"),
+            Bytes::from_static(b"nosuch"),
+        ])) else {
+            panic!("expected an array")
+        };
+        assert_eq!(info.len(), 2);
+        // Name matching is case-insensitive and answers with the canonical name.
+        assert_eq!(
+            info[0],
+            Reply::Array(vec![
+                Reply::bulk("get"),
+                Reply::Integer(2),
+                Reply::Array(vec![Reply::Simple(Bytes::from_static(b"readonly"))]),
+                Reply::Integer(1),
+                Reply::Integer(1),
+                Reply::Integer(1),
+            ])
+        );
+        assert_eq!(info[1], Reply::Bulk(None));
+        // Keyed writes announce the write flag and their key step.
+        let Reply::Array(info) = metadata(MetadataCommand::Info(vec![Bytes::from_static(b"set")]))
+        else {
+            panic!("expected an array")
+        };
+        assert_eq!(
+            info[0],
+            Reply::Array(vec![
+                Reply::bulk("set"),
+                Reply::Integer(-3),
+                Reply::Array(vec![Reply::Simple(Bytes::from_static(b"write"))]),
+                Reply::Integer(1),
+                Reply::Integer(-1),
+                Reply::Integer(2),
+            ])
+        );
+        // Commands without keys carry no flags or key positions.
+        let Reply::Array(info) = metadata(MetadataCommand::Info(vec![Bytes::from_static(b"ping")]))
+        else {
+            panic!("expected an array")
+        };
+        assert_eq!(
+            info[0],
+            Reply::Array(vec![
+                Reply::bulk("ping"),
+                Reply::Integer(-1),
+                Reply::Array(vec![]),
+                Reply::Integer(0),
+                Reply::Integer(0),
+                Reply::Integer(0),
+            ])
+        );
+    }
 }

@@ -138,4 +138,36 @@ mod tests {
         }
         assert_eq!(timers.len(), 0);
     }
+
+    #[test]
+    fn equal_deadlines_noop_updates_and_extreme_values() {
+        let mut timers = ExpiryIndex::new(0).unwrap();
+        // Peeking an empty index never expires anything, even at i64::MAX.
+        assert_eq!(timers.expired(i64::MAX), None);
+        let a = Bytes::from_static(b"a");
+        let b = Bytes::from_static(b"b");
+        let c = Bytes::from_static(b"c");
+        timers.set(a.clone(), 10);
+        timers.set(b.clone(), 10);
+        timers.set(c.clone(), 10);
+        // Re-setting an identical deadline still keeps one node per key.
+        timers.set(a.clone(), 10);
+        assert_eq!(timers.len(), 3);
+        // Removing an unknown key is a no-op.
+        timers.remove(&Bytes::from_static(b"missing"));
+        assert_eq!(timers.len(), 3);
+        // Tied deadlines all become visible exactly at the shared deadline.
+        assert_eq!(timers.expired(9), None);
+        let mut drained = 0;
+        while let Some(key) = timers.expired(10) {
+            timers.remove(&key);
+            drained += 1;
+        }
+        assert_eq!(drained, 3);
+        assert_eq!(timers.len(), 0);
+        // The minimum deadline is expired at every later clock reading.
+        timers.set(a.clone(), i64::MIN);
+        assert_eq!(timers.expired(i64::MIN), Some(a.clone()));
+        assert_eq!(timers.expired(i64::MAX), Some(a));
+    }
 }

@@ -375,4 +375,175 @@ mod tests {
             assert_eq!(reply.encoded_len(), Some(encoded.len()));
         }
     }
+
+    #[test]
+    fn limits_validation_accepts_boundaries_and_rejects_inversions() {
+        assert!(Limits::default().validate().is_ok());
+        assert!(Limits {
+            max_frame_bytes: 16,
+            max_bulk_bytes: 16,
+            max_arguments: 1,
+            max_header_bytes: 4,
+        }
+        .validate()
+        .is_ok());
+        for limits in [
+            Limits {
+                max_frame_bytes: 15,
+                ..Limits::default()
+            },
+            Limits {
+                max_bulk_bytes: 1024 * 1024 + 1,
+                ..Limits::default()
+            },
+            Limits {
+                max_arguments: 0,
+                ..Limits::default()
+            },
+            Limits {
+                max_header_bytes: 3,
+                ..Limits::default()
+            },
+            Limits {
+                max_frame_bytes: 16,
+                max_header_bytes: 17,
+                ..Limits::default()
+            },
+        ] {
+            assert_eq!(
+                limits.validate(),
+                Err(ProtocolError("invalid protocol limits"))
+            );
+        }
+    }
+
+    #[test]
+    fn frame_bulk_and_argument_limits_are_inclusive() {
+        // A frame of exactly max_frame_bytes is accepted; one byte over is not.
+        let limits = Limits {
+            max_frame_bytes: 16,
+            max_bulk_bytes: 16,
+            max_arguments: 2,
+            max_header_bytes: 16,
+        };
+        let mut decoder = Decoder::new(limits.clone()).unwrap();
+        let mut input = BytesMut::from(&b"*1\r\n$6\r\n123456\r\n"[..]);
+        assert!(decoder.decode(&mut input).unwrap().is_some());
+        assert!(matches!(
+            Decoder::new(limits)
+                .unwrap()
+                .decode(&mut BytesMut::from(&b"*1\r\n$7\r\n1234567\r\n"[..])),
+            Err(ProtocolError("request exceeds configured limit"))
+        ));
+        // A bulk of exactly max_bulk_bytes is accepted; one byte over fails at
+        // the header, before any payload is required.
+        let limits = Limits {
+            max_bulk_bytes: 6,
+            ..Limits::default()
+        };
+        let mut decoder = Decoder::new(limits.clone()).unwrap();
+        let mut input = BytesMut::from(&b"*1\r\n$6\r\n123456\r\n"[..]);
+        assert!(decoder.decode(&mut input).unwrap().is_some());
+        assert!(matches!(
+            Decoder::new(limits)
+                .unwrap()
+                .decode(&mut BytesMut::from(&b"*1\r\n$7\r\n"[..])),
+            Err(ProtocolError("bulk argument exceeds configured limit"))
+        ));
+        // An argument count of exactly max_arguments is accepted.
+        let limits = Limits {
+            max_arguments: 2,
+            ..Limits::default()
+        };
+        let mut decoder = Decoder::new(limits.clone()).unwrap();
+        let mut input = BytesMut::from(&b"*2\r\n$1\r\na\r\n$1\r\nb\r\n"[..]);
+        assert!(decoder.decode(&mut input).unwrap().is_some());
+        assert!(matches!(
+            Decoder::new(limits)
+                .unwrap()
+                .decode(&mut BytesMut::from(&b"*3\r\n"[..])),
+            Err(ProtocolError("invalid or excessive argument count"))
+        ));
+    }
+
+    #[test]
+    fn oversized_and_unterminated_headers_are_rejected() {
+        // Header content plus its CRLF must fit max_header_bytes.
+        let limits = Limits {
+            max_header_bytes: 4,
+            ..Limits::default()
+        };
+        let mut decoder = Decoder::new(limits.clone()).unwrap();
+        let mut input = BytesMut::from(&b"*1\r\n$1\r\na\r\n"[..]);
+        assert!(decoder.decode(&mut input).unwrap().is_some());
+        assert!(matches!(
+            Decoder::new(limits.clone())
+                .unwrap()
+                .decode(&mut BytesMut::from(&b"*1\r\n$12\r\nab"[..])),
+            Err(ProtocolError("protocol header exceeds configured limit"))
+        ));
+        // A buffer that reaches the header limit without a CRLF is rejected
+        // instead of waiting for more input.
+        assert!(matches!(
+            Decoder::new(limits)
+                .unwrap()
+                .decode(&mut BytesMut::from(&b"*123"[..])),
+            Err(ProtocolError("unterminated or excessive protocol header"))
+        ));
+    }
+
+    #[test]
+    fn malformed_lengths_and_line_endings_are_rejected() {
+        for (wire, expected) in [
+            (&b"\n\n"[..], "invalid protocol line ending"),
+            (&b"*1\n\r\n"[..], "invalid protocol line ending"),
+            (&b"$\r\n"[..], "expected a nonnegative RESP2 length"),
+            (&b"*1\r\n$1a\r\naa\r\n"[..], "invalid RESP2 length"),
+        ] {
+            assert!(
+                matches!(
+                    decoder().decode(&mut BytesMut::from(wire)),
+                    Err(ProtocolError(message)) if message == expected
+                ),
+                "{expected}"
+            );
+        }
+        // Length digits overflowing usize are rejected when headers allow them.
+        let limits = Limits {
+            max_header_bytes: 64,
+            ..Limits::default()
+        };
+        assert!(matches!(
+            Decoder::new(limits)
+                .unwrap()
+                .decode(&mut BytesMut::from(&b"$99999999999999999999999\r\n"[..])),
+            Err(ProtocolError("RESP2 length overflow"))
+        ));
+    }
+
+    #[test]
+    fn reply_encoding_matches_resp2_wire_format() {
+        let cases: [(Reply, &[u8]); 8] = [
+            (Reply::ok(), b"+OK\r\n"),
+            (Reply::error("ERR broken"), b"-ERR broken\r\n"),
+            (Reply::Integer(0), b":0\r\n"),
+            (Reply::Integer(-42), b":-42\r\n"),
+            (Reply::Bulk(None), b"$-1\r\n"),
+            (Reply::bulk(""), b"$0\r\n\r\n"),
+            (Reply::bulk("a\0b"), b"$3\r\na\0b\r\n"),
+            (
+                Reply::Array(vec![
+                    Reply::bulk("x"),
+                    Reply::Array(vec![Reply::Integer(7)]),
+                ]),
+                b"*2\r\n$1\r\nx\r\n*1\r\n:7\r\n",
+            ),
+        ];
+        for (reply, wire) in cases {
+            let mut encoded = Vec::new();
+            reply.encode(&mut encoded);
+            assert_eq!(encoded, wire);
+            assert_eq!(reply.encoded_len(), Some(wire.len()));
+        }
+    }
 }

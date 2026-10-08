@@ -619,6 +619,15 @@ pub(crate) fn fatal(message: &str) -> ! {
 mod tests {
     use super::*;
     use recall_core::command::{Condition, Expiry};
+    use std::sync::atomic::AtomicI64;
+
+    struct TestClock(AtomicI64);
+
+    impl Clock for TestClock {
+        fn now_ms(&self) -> i64 {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
 
     fn config() -> Config {
         Config {
@@ -805,6 +814,11 @@ mod tests {
             .unwrap(),
             Reply::Array(vec![Reply::bulk("1"), Reply::bulk("1")])
         );
+        // The abandoned request's cross-owner byte credits were released as well.
+        assert_eq!(
+            handle.routing.cross_credits.available_permits(),
+            config().queue_bytes
+        );
         engine.shutdown().await.unwrap();
     }
 
@@ -868,6 +882,387 @@ mod tests {
         control(owner, Control::Stats(response)).await;
         stats.await.unwrap();
         assert_eq!(owner.credits.available_permits(), config.queue_bytes);
+        engine.shutdown().await.unwrap();
+    }
+
+    /// Two racing cross-owner writers must never interleave: every read
+    /// observes one writer's complete pair, and the final state is one whole
+    /// history, not a mixture.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conflicting_cross_owner_writes_resolve_to_one_complete_history() {
+        let engine = Engine::start(&config()).unwrap();
+        let handle = engine.handle();
+        let (a, b) = different_keys(&handle);
+        let mut writers = Vec::new();
+        for prefix in ["A", "B"] {
+            let writer = handle.clone();
+            let (wa, wb) = (a.clone(), b.clone());
+            writers.push(tokio::spawn(async move {
+                for index in 0..100 {
+                    // Both slots carry the same value, so any mixture of the
+                    // two writers is observable as an inequality.
+                    let value = Bytes::from(format!("{prefix}{index}"));
+                    assert_eq!(
+                        writer
+                            .execute(Operation::MultiSet(vec![
+                                (wa.clone(), value.clone()),
+                                (wb.clone(), value)
+                            ]))
+                            .await,
+                        Reply::ok()
+                    );
+                }
+            }));
+        }
+        for _ in 0..200 {
+            let reply = handle
+                .execute(Operation::MultiGet(vec![a.clone(), b.clone()]))
+                .await;
+            let Reply::Array(values) = reply else {
+                panic!("expected an array")
+            };
+            match (&values[0], &values[1]) {
+                (Reply::Bulk(Some(left)), Reply::Bulk(Some(right))) => {
+                    assert_eq!(left, right)
+                }
+                (Reply::Bulk(None), Reply::Bulk(None)) => {}
+                _ => panic!("observed a partial cross-owner write"),
+            }
+        }
+        for writer in writers {
+            writer.await.unwrap();
+        }
+        let reply = handle.execute(Operation::MultiGet(vec![a, b])).await;
+        let Reply::Array(values) = reply else {
+            panic!("expected an array")
+        };
+        assert_eq!(values[0], values[1]);
+        assert!(
+            matches!(&values[0], Reply::Bulk(Some(value)) if value.starts_with(b"A") || value.starts_with(b"B"))
+        );
+        engine.shutdown().await.unwrap();
+    }
+
+    /// A cross-owner delete must never be observed halfway: EXISTS over the
+    /// pair only ever counts both keys or neither.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cross_owner_deletes_and_reads_are_atomic() {
+        let engine = Engine::start(&config()).unwrap();
+        let handle = engine.handle();
+        let (a, b) = different_keys(&handle);
+        let writer = handle.clone();
+        let (wa, wb) = (a.clone(), b.clone());
+        let task = tokio::spawn(async move {
+            for _ in 0..100 {
+                assert_eq!(
+                    writer
+                        .execute(Operation::MultiSet(vec![
+                            (wa.clone(), Bytes::from_static(b"1")),
+                            (wb.clone(), Bytes::from_static(b"1")),
+                        ]))
+                        .await,
+                    Reply::ok()
+                );
+                assert_eq!(
+                    writer
+                        .execute(Operation::Delete(vec![wa.clone(), wb.clone()]))
+                        .await,
+                    Reply::Integer(2)
+                );
+            }
+        });
+        for _ in 0..200 {
+            let reply = handle
+                .execute(Operation::Exists(vec![a.clone(), b.clone()]))
+                .await;
+            assert!(
+                matches!(reply, Reply::Integer(0) | Reply::Integer(2)),
+                "observed a partial cross-owner delete: {reply:?}"
+            );
+        }
+        task.await.unwrap();
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn execute_after_shutdown_returns_busy() {
+        let engine = Engine::start(&config()).unwrap();
+        let handle = engine.handle();
+        engine.shutdown().await.unwrap();
+        assert_eq!(
+            handle.execute(Operation::Get(Bytes::from_static(b"k"))).await,
+            Reply::error("BUSY Recall is shutting down")
+        );
+    }
+
+    /// Shutdown drains already-accepted work and rejects new admissions with a
+    /// bounded error instead of hanging the caller.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_completes_or_rejects_in_flight_work_without_hanging() {
+        let engine = Engine::start(&config()).unwrap();
+        let handle = engine.handle();
+        let task = tokio::spawn(async move {
+            for _ in 0..100 {
+                let reply = handle
+                    .execute(Operation::Increment {
+                        key: Bytes::from_static(b"n"),
+                        amount: 1,
+                        subtract: false,
+                    })
+                    .await;
+                match reply {
+                    Reply::Integer(_) => {}
+                    other => assert_eq!(other, Reply::error("BUSY Recall is shutting down")),
+                }
+            }
+        });
+        engine.shutdown().await.unwrap();
+        timeout(Duration::from_secs(5), task).await.unwrap().unwrap();
+    }
+
+    /// When an owner's byte credits are exhausted, admission waits for the
+    /// configured deadline and then rejects; releasing credits lets the same
+    /// command through.
+    #[tokio::test]
+    async fn byte_saturated_admission_times_out_and_recovers() {
+        let config = Config {
+            queue_bytes: 1024,
+            admission_timeout: Duration::from_millis(20),
+            ..config()
+        };
+        let engine = Engine::start(&config).unwrap();
+        let handle = engine.handle();
+        let key = Bytes::from_static(b"hot");
+        let owner = &handle.routing.owners[handle.owner_for(&key)];
+        // Charge for the write below is 687 bytes; hold all but 512.
+        let held = Arc::clone(&owner.credits)
+            .acquire_many_owned(512)
+            .await
+            .unwrap();
+        let denied = handle
+            .execute(Operation::Set {
+                key: key.clone(),
+                value: Bytes::from(vec![0; 300]),
+                condition: Condition::Always,
+                expiry: Expiry::Clear,
+            })
+            .await;
+        assert_eq!(
+            denied,
+            Reply::error("BUSY admission queue deadline exceeded")
+        );
+        drop(held);
+        assert_eq!(
+            handle
+                .execute(Operation::Set {
+                    key: key.clone(),
+                    value: Bytes::from(vec![0; 300]),
+                    condition: Condition::Always,
+                    expiry: Expiry::Clear,
+                })
+                .await,
+            Reply::ok()
+        );
+        engine.shutdown().await.unwrap();
+    }
+
+    /// A command whose charge exceeds the entire queue byte budget is rejected
+    /// without waiting, and admission stays healthy for ordinary commands.
+    #[tokio::test]
+    async fn commands_exceeding_queue_byte_capacity_are_rejected_immediately() {
+        let config = Config {
+            queue_bytes: 1024,
+            ..config()
+        };
+        let engine = Engine::start(&config).unwrap();
+        let handle = engine.handle();
+        // Charge is 1 + 1024 payload bytes plus per-key and request overhead.
+        let reply = handle
+            .execute(Operation::Set {
+                key: Bytes::from_static(b"k"),
+                value: Bytes::from(vec![0; 1024]),
+                condition: Condition::Always,
+                expiry: Expiry::Clear,
+            })
+            .await;
+        assert_eq!(
+            reply,
+            Reply::error("BUSY command exceeds queue byte capacity")
+        );
+        assert_eq!(
+            handle.execute(Operation::Get(Bytes::from_static(b"k"))).await,
+            Reply::Bulk(None)
+        );
+        engine.shutdown().await.unwrap();
+    }
+
+    /// A single-owner request whose response receiver is gone still applies,
+    /// and its byte credits return to the owner.
+    #[tokio::test]
+    async fn dropped_single_owner_receiver_still_applies_and_releases_credits() {
+        let config = config();
+        let engine = Engine::start(&config).unwrap();
+        let handle = engine.handle();
+        let key = Bytes::from_static(b"abandoned");
+        let owner = &handle.routing.owners[handle.owner_for(&key)];
+        let credit = Arc::clone(&owner.credits)
+            .acquire_many_owned(512)
+            .await
+            .unwrap();
+        let (response, receiver) = oneshot::channel();
+        owner
+            .data
+            .send(DataRequest {
+                operation: Operation::Set {
+                    key: key.clone(),
+                    value: Bytes::from_static(b"kept"),
+                    condition: Condition::Always,
+                    expiry: Expiry::Clear,
+                },
+                response,
+                _credit: credit,
+            })
+            .await
+            .unwrap_or_else(|_| panic!("owner closed"));
+        drop(receiver);
+        // The same owner's data channel orders the read behind the abandoned write.
+        assert_eq!(handle.execute(Operation::Get(key)).await, Reply::bulk("kept"));
+        // A control round trip confirms the data turn and credit drop finished.
+        let (response, stats) = oneshot::channel();
+        control(owner, Control::Stats(response)).await;
+        stats.await.unwrap();
+        assert_eq!(owner.credits.available_permits(), config.queue_bytes);
+        engine.shutdown().await.unwrap();
+    }
+
+    /// Engine time comes from the injected clock: expiration follows the
+    /// deterministic now_ms given to each command, not wall-clock time.
+    #[tokio::test]
+    async fn injected_clock_drives_expiration_without_wall_time() {
+        let clock = Arc::new(TestClock(AtomicI64::new(1000)));
+        let engine = Engine::with_clock(&config(), clock.clone()).unwrap();
+        let handle = engine.handle();
+        assert_eq!(
+            handle
+                .execute(Operation::Set {
+                    key: Bytes::from_static(b"ttl"),
+                    value: Bytes::from_static(b"v"),
+                    condition: Condition::Always,
+                    expiry: Expiry::AfterMilliseconds(1000),
+                })
+                .await,
+            Reply::ok()
+        );
+        assert_eq!(
+            handle
+                .execute(Operation::Ttl {
+                    key: Bytes::from_static(b"ttl"),
+                    milliseconds: true,
+                })
+                .await,
+            Reply::Integer(1000)
+        );
+        clock.0.store(1999, Ordering::Relaxed);
+        assert_eq!(
+            handle.execute(Operation::Get(Bytes::from_static(b"ttl"))).await,
+            Reply::bulk("v")
+        );
+        // The deadline is inclusive: at exactly now + duration the key is gone.
+        clock.0.store(2000, Ordering::Relaxed);
+        assert_eq!(
+            handle.execute(Operation::Get(Bytes::from_static(b"ttl"))).await,
+            Reply::Bulk(None)
+        );
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stats_cover_every_owner_and_count_applied_commands() {
+        let engine = Engine::start(&config()).unwrap();
+        let handle = engine.handle();
+        let (a, b) = different_keys(&handle);
+        assert_eq!(
+            handle
+                .execute(Operation::Set {
+                    key: a.clone(),
+                    value: Bytes::from_static(b"1"),
+                    condition: Condition::Always,
+                    expiry: Expiry::Clear,
+                })
+                .await,
+            Reply::ok()
+        );
+        assert_eq!(
+            handle
+                .execute(Operation::Increment {
+                    key: b.clone(),
+                    amount: 2,
+                    subtract: false,
+                })
+                .await,
+            Reply::Integer(2)
+        );
+        let stats = handle.stats().await;
+        assert_eq!(stats.len(), handle.worker_count());
+        assert_eq!(stats.iter().map(|owner| owner.keys).sum::<usize>(), 2);
+        assert_eq!(
+            stats
+                .iter()
+                .map(|owner| owner.applied_commands)
+                .sum::<u64>(),
+            2
+        );
+        assert_eq!(
+            stats
+                .iter()
+                .map(|owner| owner.payload_bytes)
+                .sum::<usize>(),
+            a.len() + 1 + b.len() + 1
+        );
+        engine.shutdown().await.unwrap();
+    }
+
+    /// Multi-get replies follow argument order even when keys are scattered
+    /// across every owner and requested in reverse.
+    #[tokio::test]
+    async fn multi_get_reassembles_scattered_keys_in_argument_order() {
+        let config = Config {
+            workers: 4,
+            ..config()
+        };
+        let engine = Engine::start(&config).unwrap();
+        let handle = engine.handle();
+        // Find one key per owner.
+        let mut keys: Vec<Bytes> = Vec::new();
+        for index in 0..10_000 {
+            let candidate = Bytes::from(format!("scatter-{index}"));
+            if !keys
+                .iter()
+                .any(|key| handle.owner_for(key) == handle.owner_for(&candidate))
+            {
+                keys.push(candidate);
+            }
+            if keys.len() == 4 {
+                break;
+            }
+        }
+        assert_eq!(keys.len(), 4);
+        let pairs: Vec<(Bytes, Bytes)> = keys
+            .iter()
+            .enumerate()
+            .map(|(index, key)| (key.clone(), Bytes::from(index.to_string())))
+            .collect();
+        assert_eq!(handle.execute(Operation::MultiSet(pairs)).await, Reply::ok());
+        let reversed: Vec<Bytes> = keys.iter().rev().cloned().collect();
+        assert_eq!(
+            handle.execute(Operation::MultiGet(reversed)).await,
+            Reply::Array(vec![
+                Reply::bulk("3"),
+                Reply::bulk("2"),
+                Reply::bulk("1"),
+                Reply::bulk("0"),
+            ])
+        );
         engine.shutdown().await.unwrap();
     }
 }

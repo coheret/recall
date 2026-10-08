@@ -208,9 +208,19 @@ async fn invalid_credential_forms_are_rejected_without_side_effects() {
         command(&mut stream, &[b"AUTH", b"alice", b"form-secret"]).await,
         Reply::Error(_)
     ));
+    // Correct username with the wrong password.
+    assert_eq!(
+        command(&mut stream, &[b"AUTH", b"default", b"wrong-secret"]).await,
+        Reply::error("WRONGPASS invalid username-password pair or user is disabled.")
+    );
     // Empty password.
     assert!(matches!(
         command(&mut stream, &[b"AUTH", b""]).await,
+        Reply::Error(_)
+    ));
+    // Empty username and password pair.
+    assert!(matches!(
+        command(&mut stream, &[b"AUTH", b"", b""]).await,
         Reply::Error(_)
     ));
     // Malformed argument counts.
@@ -233,6 +243,124 @@ async fn invalid_credential_forms_are_rejected_without_side_effects() {
     );
     drop(stream);
     server.stop().await;
+}
+
+/// HELLO with invalid credentials must not authenticate the connection or apply
+/// trailing options such as SETNAME; HELLO without credentials on a protected
+/// server is itself unauthorized.
+#[tokio::test]
+async fn hello_with_failed_auth_applies_no_options() {
+    let mut config = config();
+    config.password = Some(Bytes::from_static(b"negotiate-secret"));
+    let server = TestServer::start(config).await;
+
+    let mut stream = server.connect().await;
+    // Failed HELLO authentication: the trailing SETNAME must not be applied.
+    assert_eq!(
+        command(
+            &mut stream,
+            &[
+                b"HELLO",
+                b"2",
+                b"AUTH",
+                b"default",
+                b"definitely-wrong",
+                b"SETNAME",
+                b"smuggled-name"
+            ]
+        )
+        .await,
+        Reply::error("WRONGPASS invalid username-password pair or user is disabled.")
+    );
+    // The failed negotiation leaves the connection unauthenticated.
+    assert_eq!(
+        command(&mut stream, &[b"GET", b"k"]).await,
+        Reply::error("NOAUTH Authentication required.")
+    );
+    // HELLO without credentials cannot authenticate a protected server.
+    assert_eq!(
+        command(&mut stream, &[b"HELLO", b"2"]).await,
+        Reply::error("NOAUTH Authentication required.")
+    );
+    // Valid authentication succeeds, and the smuggled name was never applied.
+    assert_eq!(
+        command(&mut stream, &[b"AUTH", b"negotiate-secret"]).await,
+        Reply::ok()
+    );
+    assert_eq!(
+        command(&mut stream, &[b"CLIENT", b"GETNAME"]).await,
+        Reply::Bulk(None)
+    );
+    drop(stream);
+    server.stop().await;
+}
+
+/// Replies must never echo configured credentials, supplied credentials, or the
+/// protected values a client attempted to write before authentication.
+#[tokio::test]
+async fn error_replies_do_not_expose_passwords_or_protected_values() {
+    let configured: &[u8] = b"configured-s3cret-material";
+    let supplied: &[u8] = b"supplied-wr0ng-guess";
+    let value: &[u8] = b"protected-plaintext-value";
+    let secrets: [&[u8]; 3] = [configured, supplied, value];
+
+    let mut config = config();
+    config.password = Some(Bytes::from_static(configured));
+    let server = TestServer::start(config).await;
+
+    let mut stream = server.connect().await;
+    let rejected_write = command(&mut stream, &[b"SET", b"k", value]).await;
+    assert_eq!(
+        rejected_write,
+        Reply::error("NOAUTH Authentication required.")
+    );
+    let wrong_auth = command(&mut stream, &[b"AUTH", supplied]).await;
+    assert!(matches!(wrong_auth, Reply::Error(_)));
+    let wrong_hello = command(
+        &mut stream,
+        &[b"HELLO", b"2", b"AUTH", b"default", supplied],
+    )
+    .await;
+    assert!(matches!(wrong_hello, Reply::Error(_)));
+    for reply in [&rejected_write, &wrong_auth, &wrong_hello] {
+        assert_reply_hides(reply, &secrets);
+    }
+
+    // INFO output after authentication must not disclose the credential either.
+    assert_eq!(
+        command(&mut stream, &[b"AUTH", configured]).await,
+        Reply::ok()
+    );
+    let info = command(&mut stream, &[b"INFO"]).await;
+    assert!(matches!(info, Reply::Bulk(Some(_))));
+    assert_reply_hides(&info, &[configured]);
+    drop(stream);
+    server.stop().await;
+}
+
+/// Collect every payload byte a reply carries so tests can assert that secret
+/// material never appears in any reply form, including nested arrays.
+fn reply_payloads(reply: &Reply) -> Vec<&[u8]> {
+    match reply {
+        Reply::Simple(bytes) | Reply::Error(bytes) => vec![bytes.as_ref()],
+        Reply::Bulk(Some(bytes)) => vec![bytes.as_ref()],
+        Reply::Array(items) => items.iter().flat_map(reply_payloads).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn assert_reply_hides(reply: &Reply, secrets: &[&[u8]]) {
+    for payload in reply_payloads(reply) {
+        for secret in secrets {
+            assert!(
+                !payload
+                    .windows(secret.len())
+                    .any(|window| window == *secret),
+                "reply leaked secret material: {}",
+                String::from_utf8_lossy(payload)
+            );
+        }
+    }
 }
 
 #[tokio::test]

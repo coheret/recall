@@ -1,5 +1,6 @@
 /target/
 /artifacts/
+/.kilo/
 .env
 .env.*
 !.env.example

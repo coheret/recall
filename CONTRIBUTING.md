@@ -86,4 +86,4 @@ AI tools may help explain code, investigate failures, draft changes, or develop 
 
 For ordinary bugs, describe the expected/actual behavior and provide a minimal synthetic reproduction. Include only the settings or minimal sanitized diagnostic needed to explain the issue. Do not include private host details, deployment inventories, raw execution logs, or private keys/values.
 
-For security-sensitive findings, use the repository's private reporting facility if enabled, or contact a maintainer privately before posting details. Do not put credentials, exploit-sensitive production details, or customer data into a public issue.
+For security-sensitive findings, follow [the security policy](SECURITY.md): use the repository's private reporting facility if enabled, or contact a maintainer privately before posting details. Do not put credentials, exploit-sensitive production details, or customer data into a public issue.

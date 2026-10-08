@@ -136,6 +136,23 @@ mod tests {
     }
 
     #[test]
+    fn rejects_empty_and_oversized_passwords() {
+        let validate = |password: &[u8]| {
+            Config {
+                password: Some(Bytes::copy_from_slice(password)),
+                ..Config::default()
+            }
+            .validate()
+        };
+        // Invalid configured credentials fail startup; they never silently
+        // disable authentication or start with a weakened credential.
+        assert!(validate(b"").is_err());
+        assert!(validate(b"x").is_ok());
+        assert!(validate(&[b'x'; 1024]).is_ok());
+        assert!(validate(&[b'x'; 1025]).is_err());
+    }
+
+    #[test]
     fn apportions_payload_budget_without_losing_remainder() {
         let config = Config {
             workers: 3,

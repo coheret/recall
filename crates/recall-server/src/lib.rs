@@ -16,6 +16,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
@@ -79,12 +80,14 @@ impl Server {
         // One bounded writer delivers rejection notices: the accept loop never
         // awaits a rejected client's socket, and excess rejections close
         // silently when the queue is full.
-        let (rejection_tx, mut rejection_rx) =
-            mpsc::channel::<TcpStream>(REJECTION_QUEUE_CAPACITY);
+        let (rejection_tx, mut rejection_rx) = mpsc::channel::<TcpStream>(REJECTION_QUEUE_CAPACITY);
         let rejections = tokio::spawn(async move {
             while let Some(mut stream) = rejection_rx.recv().await {
-                let _ =
-                    timeout(REJECTION_WRITE_TIMEOUT, stream.write_all(CONNECTION_LIMIT_REPLY)).await;
+                let _ = timeout(
+                    REJECTION_WRITE_TIMEOUT,
+                    stream.write_all(CONNECTION_LIMIT_REPLY),
+                )
+                .await;
             }
         });
         tokio::pin!(shutdown);

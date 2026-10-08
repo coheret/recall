@@ -635,7 +635,10 @@ mod tests {
             max_reply_bytes: 64,
         })
         .unwrap();
-        assert_eq!(run(&mut shard, &["SET", "k", value.as_str()], 0), Reply::ok());
+        assert_eq!(
+            run(&mut shard, &["SET", "k", value.as_str()], 0),
+            Reply::ok()
+        );
         // A 64-byte bulk payload encodes past the 64-byte reply budget.
         assert_eq!(
             run(&mut shard, &["GET", "k"], 0),
@@ -654,13 +657,22 @@ mod tests {
             run(&mut shard, &["SET", "missing", "v", "XX"], 0),
             Reply::Bulk(None)
         );
-        assert_eq!(run(&mut shard, &["EXISTS", "missing"], 0), Reply::Integer(0));
+        assert_eq!(
+            run(&mut shard, &["EXISTS", "missing"], 0),
+            Reply::Integer(0)
+        );
         // A failed NX leaves the old value and its deadline untouched.
-        assert_eq!(run(&mut shard, &["SET", "k", "2", "NX"], 1), Reply::Bulk(None));
+        assert_eq!(
+            run(&mut shard, &["SET", "k", "2", "NX"], 1),
+            Reply::Bulk(None)
+        );
         assert_eq!(run(&mut shard, &["GET", "k"], 2), Reply::bulk("1"));
         assert_eq!(run(&mut shard, &["PTTL", "k"], 2), Reply::Integer(998));
         // KEEPTTL on a missing key has no deadline to keep.
-        assert_eq!(run(&mut shard, &["SET", "fresh", "v", "KEEPTTL"], 2), Reply::ok());
+        assert_eq!(
+            run(&mut shard, &["SET", "fresh", "v", "KEEPTTL"], 2),
+            Reply::ok()
+        );
         assert_eq!(run(&mut shard, &["PTTL", "fresh"], 2), Reply::Integer(-1));
         // MSET clears any existing deadline.
         assert_eq!(run(&mut shard, &["MSET", "k", "3"], 3), Reply::ok());
@@ -680,13 +692,19 @@ mod tests {
         assert_eq!(run(&mut shard, &["TTL", "d"], 0), Reply::Integer(0));
         // PERSIST: missing and non-expiring keys return 0; expiring keys lose
         // their deadline and return 1.
-        assert_eq!(run(&mut shard, &["PERSIST", "missing"], 0), Reply::Integer(0));
+        assert_eq!(
+            run(&mut shard, &["PERSIST", "missing"], 0),
+            Reply::Integer(0)
+        );
         run(&mut shard, &["SET", "plain", "1"], 0);
         assert_eq!(run(&mut shard, &["PERSIST", "plain"], 0), Reply::Integer(0));
         assert_eq!(run(&mut shard, &["PERSIST", "a"], 0), Reply::Integer(1));
         assert_eq!(run(&mut shard, &["PTTL", "a"], 0), Reply::Integer(-1));
         // PEXPIRE on a missing key is a no-op.
-        assert_eq!(run(&mut shard, &["PEXPIRE", "missing", "1000"], 0), Reply::Integer(0));
+        assert_eq!(
+            run(&mut shard, &["PEXPIRE", "missing", "1000"], 0),
+            Reply::Integer(0)
+        );
     }
 
     #[test]
@@ -699,7 +717,11 @@ mod tests {
         );
         assert_eq!(run(&mut shard, &["PTTL", "k"], 1), Reply::Integer(-1));
         assert_eq!(
-            run(&mut shard, &["SET", "k", "2", "PX", "9223372036854775807"], 1),
+            run(
+                &mut shard,
+                &["SET", "k", "2", "PX", "9223372036854775807"],
+                1
+            ),
             Reply::error("ERR invalid expire time in 'set' command")
         );
         assert_eq!(run(&mut shard, &["GET", "k"], 1), Reply::bulk("1"));

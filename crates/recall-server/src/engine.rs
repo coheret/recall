@@ -990,7 +990,9 @@ mod tests {
         let handle = engine.handle();
         engine.shutdown().await.unwrap();
         assert_eq!(
-            handle.execute(Operation::Get(Bytes::from_static(b"k"))).await,
+            handle
+                .execute(Operation::Get(Bytes::from_static(b"k")))
+                .await,
             Reply::error("BUSY Recall is shutting down")
         );
     }
@@ -1017,7 +1019,10 @@ mod tests {
             }
         });
         engine.shutdown().await.unwrap();
-        timeout(Duration::from_secs(5), task).await.unwrap().unwrap();
+        timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     /// When an owner's byte credits are exhausted, admission waits for the
@@ -1090,7 +1095,9 @@ mod tests {
             Reply::error("BUSY command exceeds queue byte capacity")
         );
         assert_eq!(
-            handle.execute(Operation::Get(Bytes::from_static(b"k"))).await,
+            handle
+                .execute(Operation::Get(Bytes::from_static(b"k")))
+                .await,
             Reply::Bulk(None)
         );
         engine.shutdown().await.unwrap();
@@ -1126,7 +1133,10 @@ mod tests {
             .unwrap_or_else(|_| panic!("owner closed"));
         drop(receiver);
         // The same owner's data channel orders the read behind the abandoned write.
-        assert_eq!(handle.execute(Operation::Get(key)).await, Reply::bulk("kept"));
+        assert_eq!(
+            handle.execute(Operation::Get(key)).await,
+            Reply::bulk("kept")
+        );
         // A control round trip confirms the data turn and credit drop finished.
         let (response, stats) = oneshot::channel();
         control(owner, Control::Stats(response)).await;
@@ -1164,13 +1174,17 @@ mod tests {
         );
         clock.0.store(1999, Ordering::Relaxed);
         assert_eq!(
-            handle.execute(Operation::Get(Bytes::from_static(b"ttl"))).await,
+            handle
+                .execute(Operation::Get(Bytes::from_static(b"ttl")))
+                .await,
             Reply::bulk("v")
         );
         // The deadline is inclusive: at exactly now + duration the key is gone.
         clock.0.store(2000, Ordering::Relaxed);
         assert_eq!(
-            handle.execute(Operation::Get(Bytes::from_static(b"ttl"))).await,
+            handle
+                .execute(Operation::Get(Bytes::from_static(b"ttl")))
+                .await,
             Reply::Bulk(None)
         );
         engine.shutdown().await.unwrap();
@@ -1213,10 +1227,7 @@ mod tests {
             2
         );
         assert_eq!(
-            stats
-                .iter()
-                .map(|owner| owner.payload_bytes)
-                .sum::<usize>(),
+            stats.iter().map(|owner| owner.payload_bytes).sum::<usize>(),
             a.len() + 1 + b.len() + 1
         );
         engine.shutdown().await.unwrap();
@@ -1252,7 +1263,10 @@ mod tests {
             .enumerate()
             .map(|(index, key)| (key.clone(), Bytes::from(index.to_string())))
             .collect();
-        assert_eq!(handle.execute(Operation::MultiSet(pairs)).await, Reply::ok());
+        assert_eq!(
+            handle.execute(Operation::MultiSet(pairs)).await,
+            Reply::ok()
+        );
         let reversed: Vec<Bytes> = keys.iter().rev().cloned().collect();
         assert_eq!(
             handle.execute(Operation::MultiGet(reversed)).await,

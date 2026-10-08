@@ -639,14 +639,16 @@ mod tests {
         ));
         assert!(parse(&args(&["HELLO", "two"]), &ParseLimits::default()).is_err());
         // AUTH requires exactly a username and password; repeats are rejected.
-        assert!(parse(&args(&["HELLO", "2", "AUTH", "default"]), &ParseLimits::default()).is_err());
-        assert!(
-            parse(
-                &args(&["HELLO", "2", "AUTH", "a", "b", "AUTH", "a", "b"]),
-                &ParseLimits::default()
-            )
-            .is_err()
-        );
+        assert!(parse(
+            &args(&["HELLO", "2", "AUTH", "default"]),
+            &ParseLimits::default()
+        )
+        .is_err());
+        assert!(parse(
+            &args(&["HELLO", "2", "AUTH", "a", "b", "AUTH", "a", "b"]),
+            &ParseLimits::default()
+        )
+        .is_err());
         assert!(matches!(
             parse(
                 &args(&["HELLO", "2", "AUTH", "u", "p", "SETNAME", "n"]),
@@ -660,7 +662,11 @@ mod tests {
             }
         ));
         assert!(matches!(
-            parse(&args(&["CLIENT", "SETNAME", "ok-name"]), &ParseLimits::default()).unwrap(),
+            parse(
+                &args(&["CLIENT", "SETNAME", "ok-name"]),
+                &ParseLimits::default()
+            )
+            .unwrap(),
             Command::Client(ClientCommand::SetName(_))
         ));
         assert!(matches!(
@@ -686,9 +692,12 @@ mod tests {
             })
         ));
         assert_eq!(
-            parse(&args(&["CLIENT", "SETINFO", "bogus", "x"]), &ParseLimits::default())
-                .unwrap_err()
-                .0,
+            parse(
+                &args(&["CLIENT", "SETINFO", "bogus", "x"]),
+                &ParseLimits::default()
+            )
+            .unwrap_err()
+            .0,
             "ERR unsupported CLIENT SETINFO attribute"
         );
         assert!(parse(&args(&["CLIENT", "bogus"]), &ParseLimits::default()).is_err());
@@ -706,7 +715,11 @@ mod tests {
         assert!(parse(&args(&["CLIENT", "SETNAME", "!~"]), &ParseLimits::default()).is_ok());
         for invalid in ["bad name", "\x7f", "tab\t", "new\n"] {
             assert!(
-                parse(&args(&["CLIENT", "SETNAME", invalid]), &ParseLimits::default()).is_err(),
+                parse(
+                    &args(&["CLIENT", "SETNAME", invalid]),
+                    &ParseLimits::default()
+                )
+                .is_err(),
                 "{invalid:?}"
             );
         }
@@ -747,15 +760,15 @@ mod tests {
             ])
         );
         assert_eq!(info[1], Reply::Bulk(None));
-        // Keyed writes announce the write flag and their key step.
-        let Reply::Array(info) = metadata(MetadataCommand::Info(vec![Bytes::from_static(b"set")]))
+        // Keyed writes announce the write flag and their multi-key positions.
+        let Reply::Array(info) = metadata(MetadataCommand::Info(vec![Bytes::from_static(b"mset")]))
         else {
             panic!("expected an array")
         };
         assert_eq!(
             info[0],
             Reply::Array(vec![
-                Reply::bulk("set"),
+                Reply::bulk("mset"),
                 Reply::Integer(-3),
                 Reply::Array(vec![Reply::Simple(Bytes::from_static(b"write"))]),
                 Reply::Integer(1),

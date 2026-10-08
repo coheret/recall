@@ -386,3 +386,30 @@ async fn incomplete_frames_have_an_absolute_deadline_and_shutdown_interrupts_idl
     server.stop().await;
     drop(idle);
 }
+
+/// A connection rejected at the connection limit receives an explicit error
+/// reply before the server closes it, instead of a bare disconnect.
+#[tokio::test]
+async fn rejected_connections_receive_an_error_before_close() {
+    let mut config = config();
+    config.max_connections = 1;
+    let server = TestServer::start(config).await;
+    // The held connection occupies the only permit, so the next is rejected.
+    let _held = server.connect().await;
+    let mut rejected = server.connect().await;
+    assert_eq!(
+        response(&mut rejected).await,
+        Reply::error("ERR max number of clients reached")
+    );
+    let mut byte = [0];
+    assert_eq!(
+        timeout(Duration::from_secs(2), rejected.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    drop(rejected);
+    drop(_held);
+    server.stop().await;
+}

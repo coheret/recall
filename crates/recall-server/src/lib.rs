@@ -22,6 +22,10 @@ use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::{timeout, timeout_at, Instant};
 
+/// Best-effort notice sent before closing a connection rejected at the
+/// configured connection limit. Encoded as a RESP2 error reply.
+const CONNECTION_LIMIT_REPLY: &[u8] = b"-ERR max number of clients reached\r\n";
+
 #[derive(Default)]
 pub(crate) struct Metrics {
     active_connections: AtomicUsize,
@@ -84,7 +88,18 @@ impl Server {
                         Err(error) => break Err(error),
                     };
                     let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
-                        metrics.rejected_connections.fetch_add(1, Ordering::Relaxed);
+                        let rejected = metrics.rejected_connections.fetch_add(1, Ordering::Relaxed) + 1;
+                        // One non-blocking write, then close: a rejected client
+                        // must never stall the accept loop, so there is no
+                        // flush await and no per-rejection task. The log notice
+                        // is sampled because stderr backpressure under a
+                        // connection flood would stall admission the same way.
+                        let _ = stream.try_write(CONNECTION_LIMIT_REPLY);
+                        if rejected == 1 || rejected % 1024 == 0 {
+                            eprintln!(
+                                "Recall connection limit reached; {rejected} connections rejected so far"
+                            );
+                        }
                         drop(stream); // Do not spawn a response task for rejected connections.
                         continue;
                     };

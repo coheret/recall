@@ -417,5 +417,8 @@ async fn rejected_connections_receive_an_error_before_close() {
     server.stop().await;
     let (wire, closed) = outcome.expect("rejection reply within the deadline");
     assert_eq!(wire, b"-ERR max number of clients reached\r\n");
-    assert!(closed, "the server closes a rejected connection after the reply");
+    assert!(
+        closed,
+        "the server closes a rejected connection after the reply"
+    );
 }

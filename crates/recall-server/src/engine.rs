@@ -614,7 +614,9 @@ pub(crate) fn fatal(message: &str) -> ! {
     // Write straight to the stderr descriptor: the test harness captures
     // eprintln! per test, which would hide the reason for a process abort.
     use std::io::Write as _;
-    let line = format!("Recall invariant failure: {message}; stopping rather than serving uncertain state\n");
+    let line = format!(
+        "Recall invariant failure: {message}; stopping rather than serving uncertain state\n"
+    );
     let _ = std::io::stderr().lock().write_all(line.as_bytes());
     std::process::abort()
 }

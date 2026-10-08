@@ -18,13 +18,17 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::{timeout, timeout_at, Instant};
 
 /// Best-effort notice sent before closing a connection rejected at the
 /// configured connection limit. Encoded as a RESP2 error reply.
 const CONNECTION_LIMIT_REPLY: &[u8] = b"-ERR max number of clients reached\r\n";
+
+/// Queue bound and per-notice write budget for rejected-connection replies.
+const REJECTION_QUEUE_CAPACITY: usize = 32;
+const REJECTION_WRITE_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[derive(Default)]
 pub(crate) struct Metrics {
@@ -72,6 +76,17 @@ impl Server {
         let permits = Arc::new(Semaphore::new(config.max_connections));
         let mut connections = JoinSet::new();
         let (stopping, shutdown_rx) = watch::channel(false);
+        // One bounded writer delivers rejection notices: the accept loop never
+        // awaits a rejected client's socket, and excess rejections close
+        // silently when the queue is full.
+        let (rejection_tx, mut rejection_rx) =
+            mpsc::channel::<TcpStream>(REJECTION_QUEUE_CAPACITY);
+        let rejections = tokio::spawn(async move {
+            while let Some(mut stream) = rejection_rx.recv().await {
+                let _ =
+                    timeout(REJECTION_WRITE_TIMEOUT, stream.write_all(CONNECTION_LIMIT_REPLY)).await;
+            }
+        });
         tokio::pin!(shutdown);
         let outcome = loop {
             tokio::select! {
@@ -89,18 +104,15 @@ impl Server {
                     };
                     let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
                         let rejected = metrics.rejected_connections.fetch_add(1, Ordering::Relaxed) + 1;
-                        // One non-blocking write, then close: a rejected client
-                        // must never stall the accept loop, so there is no
-                        // flush await and no per-rejection task. The log notice
-                        // is sampled because stderr backpressure under a
-                        // connection flood would stall admission the same way.
-                        let _ = stream.try_write(CONNECTION_LIMIT_REPLY);
+                        // The sampled log notice has no client side effects;
+                        // stderr backpressure under a flood must not stall
+                        // admission either.
                         if rejected == 1 || rejected % 1024 == 0 {
                             eprintln!(
                                 "Recall connection limit reached; {rejected} connections rejected so far"
                             );
                         }
-                        drop(stream); // Do not spawn a response task for rejected connections.
+                        let _ = rejection_tx.try_send(stream);
                         continue;
                     };
                     let id = metrics.total_connections.fetch_add(1, Ordering::Relaxed) + 1;
@@ -114,6 +126,7 @@ impl Server {
             }
         };
         drop(listener);
+        drop(rejection_tx);
         let _ = stopping.send(true);
         while let Some(completed) = connections.join_next().await {
             if completed.is_err() {
@@ -121,6 +134,7 @@ impl Server {
             }
         }
         engine.shutdown().await?;
+        rejections.await.map_err(io::Error::other)?;
         outcome
     }
 }

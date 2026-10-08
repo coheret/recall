@@ -2,9 +2,25 @@
 
 Recall's development focuses on parallel execution, predictable resource use, reliable state management, and straightforward operation. Stages describe engineering outcomes and acceptance gates, not release dates.
 
-**Current stage:** Non-production prototype. Substantial architecture, performance, security, and reliability work remains. Formatting, Clippy, test, and release-build gates pass in Linux CI, including the negative authorization and expanded parser, storage, coordination, saturation, and shutdown suites; the remaining priority is sustained stress and overload validation on a dedicated instance; see [validation and development](docs/validation.md).
+**Current stage:** Stage 2, predictable scheduling and resource control. Recall remains a non-production prototype. Stage 1 closed with formatting, Clippy, test, and release-build gates green in Linux CI plus the stress/overload checklist passing at smoke scale (10-minute soak; extended soaks remain a hardening option). See [validation and development](docs/validation.md).
 
 **Platform:** Linux is the sole Tier 1 development and deployment target. Additional platform support is outside the current roadmap.
+
+## Stage map
+
+```mermaid
+flowchart LR
+    S1["1 · Validate and stabilize the foundation"] --> S2["2 · Predictable scheduling and resource control"]
+    S2 --> S3["3 · Durability under crash and power-loss faults"]
+    S3 --> S4["4 · Storage lifecycle and maintenance checkpoints"]
+    S4 --> S5["5 · Production qualification"]
+    classDef done fill:#1a7f37,color:#ffffff,stroke:none
+    classDef current fill:#bf8700,color:#ffffff,stroke:none
+    classDef pending fill:#6e7781,color:#ffffff,stroke:none
+    class S1 done
+    class S2 current
+    class S3,S4,S5 pending
+```
 
 ## Foundation already in source
 
@@ -20,7 +36,7 @@ Source presence does not mean a milestone is validated. The initial runtime rema
 
 ## 1. Validate and stabilize the foundation
 
-**State:** In progress; diagnostics, negative authorization coverage, and the expanded stabilization test suites pass in Linux CI. Sustained stress and overload validation remains.
+**State:** Complete. Diagnostics, negative authorization coverage, and the expanded stabilization suites pass in Linux CI; stress/overload validation passed at smoke scale: sustained load without drift, bounded rejection and recovery at connection/key/reply limits, churn, disconnect release, and bounded shutdown.
 
 - Use the pinned toolchain and a generated dependency lock for locked builds.
 - Run formatting, diagnostics, tests, and release builds on Linux.

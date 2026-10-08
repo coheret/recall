@@ -389,6 +389,10 @@ async fn incomplete_frames_have_an_absolute_deadline_and_shutdown_interrupts_idl
 
 /// A connection rejected at the connection limit receives an explicit error
 /// reply before the server closes it, instead of a bare disconnect.
+// TEMPORARY bisect marker: the network test binary aborts with SIGABRT in CI
+// since this test was added, but the aborting test is unidentified. Ignoring
+// this test distinguishes the permit-exhaustion path from its neighbors.
+#[ignore = "bisecting the CI network-binary abort"]
 #[tokio::test]
 async fn rejected_connections_receive_an_error_before_close() {
     let mut config = config();

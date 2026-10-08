@@ -52,7 +52,7 @@ The memory setting limits live key/value payloads; it is not a process RSS ceili
 
 The initial server is **memory-only and loopback-only**. Data is lost when the process exits. Durable storage, encrypted remote access, eviction policies, and online checkpoints are planned separately.
 
-The current implementations are a foundation for further development, not production-grade execution or resource management. Formatting, Clippy, and the negative authorization cases pass in Linux CI; validation work now prioritizes broader test expansion, sustained resource pressure, and shutdown behavior. See [validation and development](docs/validation.md).
+The current implementations are a foundation for further development, not production-grade execution or resource management. Formatting, Clippy, and the test suites pass in Linux CI, including negative authorization and adversarial parser, capacity, coordination, and shutdown cases; validation work now prioritizes sustained resource pressure and overload testing on a dedicated instance. See [validation and development](docs/validation.md).
 
 ## Configuration and deployment
 

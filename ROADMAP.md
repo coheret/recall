@@ -2,7 +2,7 @@
 
 Recall's development focuses on parallel execution, predictable resource use, reliable state management, and straightforward operation. Stages describe engineering outcomes and acceptance gates, not release dates.
 
-**Current stage:** Non-production prototype. Substantial architecture, performance, security, and reliability work remains. Formatting, Clippy, test, and release-build gates pass in Linux CI with the negative authorization coverage in place; the remaining priorities are broader test expansion and sustained stress and overload validation; see [validation and development](docs/validation.md).
+**Current stage:** Non-production prototype. Substantial architecture, performance, security, and reliability work remains. Formatting, Clippy, test, and release-build gates pass in Linux CI, including the negative authorization and expanded parser, storage, coordination, saturation, and shutdown suites; the remaining priority is sustained stress and overload validation on a dedicated instance; see [validation and development](docs/validation.md).
 
 **Platform:** Linux is the sole Tier 1 development and deployment target. Additional platform support is outside the current roadmap.
 
@@ -20,7 +20,7 @@ Source presence does not mean a milestone is validated. The initial runtime rema
 
 ## 1. Validate and stabilize the foundation
 
-**State:** In progress; diagnostics and negative authorization coverage pass in Linux CI. Broader test expansion and stress validation remain.
+**State:** In progress; diagnostics, negative authorization coverage, and the expanded stabilization test suites pass in Linux CI. Sustained stress and overload validation remains.
 
 - Use the pinned toolchain and a generated dependency lock for locked builds.
 - Run formatting, diagnostics, tests, and release builds on Linux.

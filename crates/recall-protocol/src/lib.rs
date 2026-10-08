@@ -515,9 +515,9 @@ mod tests {
             ..Limits::default()
         };
         assert!(matches!(
-            Decoder::new(limits)
-                .unwrap()
-                .decode(&mut BytesMut::from(&b"*1\r\n$99999999999999999999999\r\n"[..])),
+            Decoder::new(limits).unwrap().decode(&mut BytesMut::from(
+                &b"*1\r\n$99999999999999999999999\r\n"[..]
+            )),
             Err(ProtocolError("RESP2 length overflow"))
         ));
     }

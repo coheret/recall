@@ -509,6 +509,7 @@ mod tests {
             );
         }
         // Length digits overflowing usize are rejected when headers allow them.
+        // The frame header must parse first; the bulk length carries the overflow.
         let limits = Limits {
             max_header_bytes: 64,
             ..Limits::default()
@@ -516,7 +517,7 @@ mod tests {
         assert!(matches!(
             Decoder::new(limits)
                 .unwrap()
-                .decode(&mut BytesMut::from(&b"$99999999999999999999999\r\n"[..])),
+                .decode(&mut BytesMut::from(&b"*1\r\n$99999999999999999999999\r\n"[..])),
             Err(ProtocolError("RESP2 length overflow"))
         ));
     }

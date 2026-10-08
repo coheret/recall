@@ -611,7 +611,11 @@ fn route(hash: &RandomState, owners: usize, key: &[u8]) -> usize {
 }
 
 pub(crate) fn fatal(message: &str) -> ! {
-    eprintln!("Recall invariant failure: {message}; stopping rather than serving uncertain state");
+    // Write straight to the stderr descriptor: the test harness captures
+    // eprintln! per test, which would hide the reason for a process abort.
+    use std::io::Write as _;
+    let line = format!("Recall invariant failure: {message}; stopping rather than serving uncertain state\n");
+    let _ = std::io::stderr().lock().write_all(line.as_bytes());
     std::process::abort()
 }
 

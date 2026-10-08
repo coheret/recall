@@ -389,10 +389,6 @@ async fn incomplete_frames_have_an_absolute_deadline_and_shutdown_interrupts_idl
 
 /// A connection rejected at the connection limit receives an explicit error
 /// reply before the server closes it, instead of a bare disconnect.
-// TEMPORARY bisect marker: the network test binary aborts with SIGABRT in CI
-// since this test was added, but the aborting test is unidentified. Ignoring
-// this test distinguishes the permit-exhaustion path from its neighbors.
-#[ignore = "bisecting the CI network-binary abort"]
 #[tokio::test]
 async fn rejected_connections_receive_an_error_before_close() {
     let mut config = config();
@@ -401,19 +397,25 @@ async fn rejected_connections_receive_an_error_before_close() {
     // The held connection occupies the only permit, so the next is rejected.
     let _held = server.connect().await;
     let mut rejected = server.connect().await;
-    assert_eq!(
-        response(&mut rejected).await,
-        Reply::error("ERR max number of clients reached")
-    );
-    let mut byte = [0];
-    assert_eq!(
-        timeout(Duration::from_secs(2), rejected.read(&mut byte))
-            .await
-            .unwrap()
-            .unwrap(),
-        0
-    );
+    // Collect the outcome and stop the server before asserting: a panicking
+    // test would otherwise drop its runtime with the server task alive, and
+    // the coordinator's abort-on-drop guard would mask the failure.
+    let outcome = timeout(Duration::from_secs(5), async {
+        let mut wire = Vec::new();
+        while !wire.ends_with(b"\r\n") {
+            if rejected.read_buf(&mut wire).await.unwrap_or(0) == 0 {
+                break;
+            }
+        }
+        let mut byte = [0];
+        let closed = rejected.read(&mut byte).await.unwrap_or(0) == 0;
+        (wire, closed)
+    })
+    .await;
     drop(rejected);
     drop(_held);
     server.stop().await;
+    let (wire, closed) = outcome.expect("rejection reply within the deadline");
+    assert_eq!(wire, b"-ERR max number of clients reached\r\n");
+    assert!(closed, "the server closes a rejected connection after the reply");
 }
